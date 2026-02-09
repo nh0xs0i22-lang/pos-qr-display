@@ -36,6 +36,12 @@ static lv_obj_t *s_lbl_desc;       /* description label (above QR)      */
    Used to skip redundant lv_qrcode_update() calls. */
 static qr_payload_t s_last;
 
+static void on_qr_screen_tap(lv_event_t *e)
+{
+    (void)e;
+    qr_screen_hide();
+}
+
 /* ── Public API ──────────────────────────────────────────────────────── */
 
 void qr_screen_init(lv_disp_t *disp)
@@ -49,6 +55,7 @@ void qr_screen_init(lv_disp_t *disp)
     s_scr_qr = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(s_scr_qr, lv_color_white(), 0);
     lv_obj_set_style_bg_opa(s_scr_qr, LV_OPA_COVER, 0);
+    lv_obj_add_event_cb(s_scr_qr, on_qr_screen_tap, LV_EVENT_CLICKED, NULL);
 
     /* QR code widget – centred, no border */
     s_qr = lv_qrcode_create(s_scr_qr, QR_SIZE,
