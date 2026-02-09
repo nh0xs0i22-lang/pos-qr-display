@@ -5,9 +5,9 @@
 #define APP_WIFI_PASS           "your-password"
 #define APP_WIFI_MAX_RETRY      10
 
-/* ── MQTT ─────────────────────────────────── */
-#define APP_MQTT_BROKER_URI     "mqtt://your-broker:1883"
-#define APP_MQTT_TOPIC_QR       "pos/qr/display"
+/* ── MQTT topics ──────────────────────────── */
+#define APP_MQTT_TOPIC_QR_SHOW  "pos/qr/show"
+#define APP_MQTT_TOPIC_QR_HIDE  "pos/qr/hide"
 #define APP_MQTT_TOPIC_RESULT   "pos/qr/result"
 
 /* ── LCD (ST7701 RGB 480×480 RGB565) ──────── */
