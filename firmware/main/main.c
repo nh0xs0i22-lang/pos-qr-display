@@ -1,9 +1,8 @@
 /*
- * Display test – LVGL + ST7701S
+ * POS QR Display – main
  *
- * Minimal main that initialises LVGL and the LCD driver, then draws
- * a static test pattern to verify display quality and colour mapping.
- * No WiFi, MQTT, touch, or UI logic.
+ * Initialises LCD + LVGL, starts MQTT, and polls for QR data.
+ * WiFi must be initialised before mqtt_service_init() – add when ready.
  */
 
 #include "freertos/FreeRTOS.h"
@@ -17,6 +16,8 @@
 
 #include "app_config.h"
 #include "lcd_st7701.h"
+#include "mqtt_service.h"
+#include "qr_screen.h"
 
 static const char *TAG = "main";
 
@@ -28,69 +29,29 @@ static void lvgl_tick_cb(void *arg)
     lv_tick_inc(APP_LVGL_TICK_MS);
 }
 
-/* ── LVGL handler task ────────────────────────────────────────────────── */
+/* ── LVGL handler task + MQTT→UI polling ──────────────────────────────── */
 
 static void lvgl_task(void *arg)
 {
     (void)arg;
     ESP_LOGI(TAG, "LVGL task running");
+
+    bool showing_qr = false;
+
     for (;;) {
+        /* Poll MQTT state and drive screen transitions */
+        bool has_qr = mqtt_service_has_qr_data();
+
+        if (has_qr) {
+            qr_screen_show(mqtt_service_get_qr());
+            showing_qr = true;
+        } else if (showing_qr) {
+            qr_screen_hide();
+            showing_qr = false;
+        }
+
         lv_timer_handler();
-        vTaskDelay(pdMS_TO_TICKS(5));
-    }
-}
-
-/* ── Test screen ──────────────────────────────────────────────────────── *
- *                                                                         *
- *   ┌──────────────────────────────────┐                                  *
- *   │ RED              GREEN           │                                  *
- *   │                                  │                                  *
- *   │          ┌──────────┐            │                                  *
- *   │          │  WHITE   │            │  dark-gray background            *
- *   │          └──────────┘            │                                  *
- *   │                                  │                                  *
- *   │ BLUE             WHITE           │                                  *
- *   └──────────────────────────────────┘                                  *
- *                                                                         *
- *  Corner patches verify RGB channel mapping is correct.                  *
- * ─────────────────────────────────────────────────────────────────────── */
-
-static void test_screen_create(lv_disp_t *disp)
-{
-    lv_obj_t *scr = lv_disp_get_scr_act(disp);
-
-    /* Dark-gray background */
-    lv_obj_set_style_bg_color(scr, lv_color_make(0x40, 0x40, 0x40), 0);
-    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
-
-    /* Centered white rectangle (200×200) */
-    lv_obj_t *box = lv_obj_create(scr);
-    lv_obj_remove_style_all(box);
-    lv_obj_set_size(box, 200, 200);
-    lv_obj_center(box);
-    lv_obj_set_style_bg_color(box, lv_color_white(), 0);
-    lv_obj_set_style_bg_opa(box, LV_OPA_COVER, 0);
-
-    /* Corner colour patches – verify R/G/B channel mapping */
-    static const struct {
-        lv_align_t align;
-        lv_coord_t x, y;
-        uint8_t r, g, b;
-    } corners[] = {
-        { LV_ALIGN_TOP_LEFT,      20,  20,  0xFF, 0x00, 0x00 }, /* Red   */
-        { LV_ALIGN_TOP_RIGHT,    -20,  20,  0x00, 0xFF, 0x00 }, /* Green */
-        { LV_ALIGN_BOTTOM_LEFT,   20, -20,  0x00, 0x00, 0xFF }, /* Blue  */
-        { LV_ALIGN_BOTTOM_RIGHT, -20, -20,  0xFF, 0xFF, 0xFF }, /* White */
-    };
-
-    for (int i = 0; i < 4; i++) {
-        lv_obj_t *p = lv_obj_create(scr);
-        lv_obj_remove_style_all(p);
-        lv_obj_set_size(p, 60, 60);
-        lv_obj_align(p, corners[i].align, corners[i].x, corners[i].y);
-        lv_obj_set_style_bg_color(p,
-            lv_color_make(corners[i].r, corners[i].g, corners[i].b), 0);
-        lv_obj_set_style_bg_opa(p, LV_OPA_COVER, 0);
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
 
@@ -98,7 +59,7 @@ static void test_screen_create(lv_disp_t *disp)
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "=== Display Test ===");
+    ESP_LOGI(TAG, "=== POS QR Display ===");
 
     /* 1. Initialise LVGL library */
     lv_init();
@@ -123,13 +84,17 @@ void app_main(void)
     ESP_ERROR_CHECK(lcd_st7701_register_lvgl(panel, &disp));
     ESP_LOGI(TAG, "LVGL display registered");
 
-    /* 5. Draw static test pattern */
-    test_screen_create(disp);
-    ESP_LOGI(TAG, "Test screen created");
+    /* 5. Create QR + idle screens */
+    qr_screen_init(disp);
 
-    /* 6. Start LVGL handler task */
+    /* 6. TODO: Initialise WiFi (required before MQTT) */
+
+    /* 7. Start MQTT service */
+    ESP_ERROR_CHECK(mqtt_service_init());
+
+    /* 8. Start LVGL handler task (includes MQTT→UI polling) */
     xTaskCreate(lvgl_task, "lvgl", APP_LVGL_TASK_STACK, NULL,
                 APP_LVGL_TASK_PRIO, NULL);
 
-    ESP_LOGI(TAG, "Display test running");
+    ESP_LOGI(TAG, "System running");
 }
