@@ -17,6 +17,7 @@
 #include "app_config.h"
 #include "lcd_st7701.h"
 #include "mqtt_service.h"
+#include "idle_screen.h"
 #include "qr_screen.h"
 
 static const char *TAG = "main";
@@ -84,15 +85,19 @@ void app_main(void)
     ESP_ERROR_CHECK(lcd_st7701_register_lvgl(panel, &disp));
     ESP_LOGI(TAG, "LVGL display registered");
 
-    /* 5. Create QR + idle screens */
+    /* 5. Create idle screen (flip clock) and make it active */
+    idle_screen_init(disp);
+    idle_screen_show();
+
+    /* 6. Create QR screen (captures the active screen as its idle target) */
     qr_screen_init(disp);
 
-    /* 6. TODO: Initialise WiFi (required before MQTT) */
+    /* 7. TODO: Initialise WiFi (required before MQTT) */
 
-    /* 7. Start MQTT service */
+    /* 8. Start MQTT service */
     ESP_ERROR_CHECK(mqtt_service_init());
 
-    /* 8. Start LVGL handler task (includes MQTT→UI polling) */
+    /* 9. Start LVGL handler task (includes MQTT→UI polling) */
     xTaskCreate(lvgl_task, "lvgl", APP_LVGL_TASK_STACK, NULL,
                 APP_LVGL_TASK_PRIO, NULL);
 
