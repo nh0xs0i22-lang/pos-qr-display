@@ -1,8 +1,7 @@
 #pragma once
 
 /* ── WiFi ─────────────────────────────────── */
-#define APP_WIFI_SSID           "your-ssid"
-#define APP_WIFI_PASS           "your-password"
+/* SSID and password are in secrets/secrets.h  */
 #define APP_WIFI_MAX_RETRY      10
 
 /* ── MQTT topics ──────────────────────────── */

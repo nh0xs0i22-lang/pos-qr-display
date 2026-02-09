@@ -16,6 +16,8 @@
 
 #include "app_config.h"
 #include "lcd_st7701.h"
+#include "wifi_service.h"
+#include "time_service.h"
 #include "mqtt_service.h"
 #include "idle_screen.h"
 #include "qr_screen.h"
@@ -92,12 +94,16 @@ void app_main(void)
     /* 6. Create QR screen (captures the active screen as its idle target) */
     qr_screen_init(disp);
 
-    /* 7. TODO: Initialise WiFi (required before MQTT) */
+    /* 7. Initialise WiFi (NVS + STA, non-blocking) */
+    wifi_service_init();
 
-    /* 8. Start MQTT service */
+    /* 8. Start SNTP (retries in background until WiFi connects) */
+    time_service_init();
+
+    /* 9. Start MQTT service */
     ESP_ERROR_CHECK(mqtt_service_init());
 
-    /* 9. Start LVGL handler task (includes MQTT→UI polling) */
+    /* 10. Start LVGL handler task (includes MQTT→UI polling) */
     xTaskCreate(lvgl_task, "lvgl", APP_LVGL_TASK_STACK, NULL,
                 APP_LVGL_TASK_PRIO, NULL);
 
