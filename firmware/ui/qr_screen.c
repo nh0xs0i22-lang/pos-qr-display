@@ -36,10 +36,26 @@ static lv_obj_t *s_lbl_desc;       /* description label (above QR)      */
    Used to skip redundant lv_qrcode_update() calls. */
 static qr_payload_t s_last;
 
+/* User-dismiss flag: true = user tapped to hide QR, suppress auto-show. */
+static bool s_qr_dismissed_by_user;
+
+/* True while a non-MQTT (static) QR is being displayed. */
+static bool s_showing_static;
+
 static void on_qr_screen_tap(lv_event_t *e)
 {
     (void)e;
-    qr_screen_hide();
+    if (s_showing_static) {
+        /* Static QR: just return to idle, no MQTT dismiss flag. */
+        s_showing_static = false;
+        qr_screen_hide();
+        ESP_LOGI(TAG, "Static QR dismissed");
+    } else {
+        /* MQTT QR: set dismiss flag so the main loop won't re-show. */
+        s_qr_dismissed_by_user = true;
+        qr_screen_hide();
+        ESP_LOGI(TAG, "QR dismissed by user");
+    }
 }
 
 /* ── Public API ──────────────────────────────────────────────────────── */
@@ -48,7 +64,7 @@ void qr_screen_init(lv_disp_t *disp)
 {
     /* ── Idle screen: plain white ─────────────────────────────────── */
     s_scr_idle = lv_disp_get_scr_act(disp);
-    lv_obj_set_style_bg_color(s_scr_idle, lv_color_white(), 0);
+    lv_obj_set_style_bg_color(s_scr_idle, lv_color_black(), 0);
     lv_obj_set_style_bg_opa(s_scr_idle, LV_OPA_COVER, 0);
 
     /* ── QR screen ────────────────────────────────────────────────── */
@@ -85,6 +101,8 @@ void qr_screen_init(lv_disp_t *disp)
 
 void qr_screen_show(const qr_payload_t *payload)
 {
+    s_showing_static = false;   /* MQTT path clears static flag */
+
     /* Skip update if payload is identical to the last one shown. */
     if (memcmp(&s_last, payload, sizeof(s_last)) == 0) {
         /* Ensure QR screen is active even if data unchanged. */
@@ -112,9 +130,33 @@ void qr_screen_show(const qr_payload_t *payload)
              payload->amount, payload->desc);
 }
 
+void qr_screen_show_static(const char *qr_data, const char *amount,
+                            const char *desc)
+{
+    qr_payload_t payload = {0};
+    strncpy(payload.data,   qr_data, sizeof(payload.data)   - 1);
+    strncpy(payload.amount, amount,  sizeof(payload.amount)  - 1);
+    strncpy(payload.desc,   desc,    sizeof(payload.desc)    - 1);
+
+    qr_screen_show(&payload);   /* reuse existing render path */
+    s_showing_static = true;    /* override: this is not MQTT */
+    ESP_LOGI(TAG, "Showing static QR");
+}
+
 void qr_screen_hide(void)
 {
     lv_scr_load(s_scr_idle);
     memset(&s_last, 0, sizeof(s_last));
+    s_showing_static = false;
     ESP_LOGI(TAG, "QR hidden");
+}
+
+bool qr_screen_is_dismissed(void)
+{
+    return s_qr_dismissed_by_user;
+}
+
+void qr_screen_clear_dismissed(void)
+{
+    s_qr_dismissed_by_user = false;
 }

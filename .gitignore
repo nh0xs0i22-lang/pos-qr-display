@@ -1,2 +1,18 @@
-# Secrets (do not commit)
+# --- ESP-IDF (Cái này cực nặng, bỏ hết) ---
+firmware/build/
+firmware/sdkconfig.old
+firmware/managed_components/
+firmware/dependencies.lock
+
+# --- VS Code & System ---
+.vscode/
+.DS_Store
+Thumbs.db
+
+# --- Secrets (Cực kỳ quan trọng vì fen nói có API) ---
+# Nếu file prompts/claude_base.txt có chứa API key thì chặn luôn:
+prompts/claude_base.txt
+
+# Hoặc chặn nguyên folder nếu nó chứa toàn đồ nhạy cảm:
+# prompts/
 firmware/secrets/

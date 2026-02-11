@@ -17,7 +17,9 @@
  */
 
 #include "idle_screen.h"
+#include "qr_screen.h"
 
+#include <stdio.h>
 #include <string.h>
 #include <time.h>
 
@@ -179,6 +181,51 @@ static void init_digit(digit_t *d, lv_obj_t *parent,
     d->ch     = '0';
 }
 
+/* ── Static VietQR (walk-in / tip payments) ──────────────────────────── *
+ *                                                                        *
+ * EMVCo QR payload for MB Bank (BIN 970422), account 0973202625.         *
+ * Tag structure:                                                         *
+ *   00 "01"            – payload format indicator                        *
+ *   01 "11"            – static (reusable, no fixed amount)              *
+ *   38 (54 bytes)      – VietQR merchant account info                    *
+ *      00 "A000000727" – VietQR GUID                                     *
+ *      01 (24 bytes)   – bank: BIN 970422 + account 0973202625           *
+ *      02 "QRIBFTTA"   – transfer-to-account service code                *
+ *   53 "704"           – VND                                             *
+ *   58 "VN"            – country                                         *
+ *   62 (23 bytes)      – purpose: "Thanh toan tai quay"                  *
+ *   63 "XXXX"          – CRC-16/CCITT-FALSE (computed at runtime)        *
+ * ────────────────────────────────────────────────────────────────────── */
+
+static const char VIETQR_BASE[] =
+    "00020101021138540010A000000727"
+    "0124000697042201100973202625"
+    "0208QRIBFTTA"
+    "5303704"
+    "5802VN"
+    "62230819Thanh toan tai quay"
+    "6304";
+
+static char s_vietqr[128];         /* base (114 chars) + CRC (4) + NUL */
+
+static uint16_t crc16_ccitt(const char *data, size_t len)
+{
+    uint16_t crc = 0xFFFF;
+    for (size_t i = 0; i < len; i++) {
+        crc ^= ((uint16_t)(uint8_t)data[i] << 8);
+        for (int j = 0; j < 8; j++)
+            crc = (crc & 0x8000) ? ((crc << 1) ^ 0x1021) : (crc << 1);
+    }
+    return crc;
+}
+
+static void on_idle_tap(lv_event_t *e)
+{
+    (void)e;
+    qr_screen_show_static(s_vietqr, "",
+                           "NGUYEN THI NHI - MB Bank");
+}
+
 /* ── Public API ──────────────────────────────────────────────────────── */
 
 void idle_screen_init(lv_disp_t *disp)
@@ -233,6 +280,19 @@ void idle_screen_init(lv_disp_t *disp)
 
     /* 1-second check timer (redraws only when minute changes) */
     s_timer = lv_timer_create(time_check_cb, 1000, NULL);
+
+    /* ── Build static VietQR string (one-time) ──────────────────────── */
+    strcpy(s_vietqr, VIETQR_BASE);
+    uint16_t crc = crc16_ccitt(s_vietqr, strlen(s_vietqr));
+    snprintf(s_vietqr + strlen(s_vietqr), 5, "%04X", crc);
+
+    /* ── Full-screen tap overlay (triggers static VietQR) ───────────── */
+    lv_obj_t *overlay = lv_obj_create(s_scr);
+    lv_obj_remove_style_all(overlay);
+    lv_obj_set_size(overlay, APP_LCD_H_RES, APP_LCD_V_RES);
+    lv_obj_set_pos(overlay, 0, 0);
+    lv_obj_clear_flag(overlay, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(overlay, on_idle_tap, LV_EVENT_CLICKED, NULL);
 
     ESP_LOGI(TAG, "Idle screen ready (%02d:%02d)", t.tm_hour, t.tm_min);
 }

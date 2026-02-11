@@ -45,3 +45,9 @@ bool mqtt_service_has_qr_data(void);
  * cache the pointer across frames.
  */
 const qr_payload_t *mqtt_service_get_qr(void);
+
+/**
+ * Generation counter – incremented each time a new pos/qr/show arrives.
+ * Used by the UI loop to detect new payloads vs. the same old data.
+ */
+uint32_t mqtt_service_get_qr_gen(void);

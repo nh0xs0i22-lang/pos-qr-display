@@ -9,7 +9,7 @@
 
 #include "mqtt_service.h"
 #include "app_config.h"
-#include "secrets/secrets.h"
+#include "secrets.h"
 
 #include <string.h>
 
@@ -27,6 +27,7 @@ static const char *TAG = "mqtt";
 static portMUX_TYPE    s_lock   = portMUX_INITIALIZER_UNLOCKED;
 static qr_payload_t    s_qr;
 static volatile bool   s_has_qr;
+static volatile uint32_t s_qr_gen;   /* incremented on each new qr/show */
 
 /* ── Helpers ──────────────────────────────────────────────────────────── */
 
@@ -73,6 +74,7 @@ static void handle_qr_show(const char *data, int len)
     portENTER_CRITICAL(&s_lock);
     s_qr     = tmp;
     s_has_qr = true;
+    s_qr_gen++;
     portEXIT_CRITICAL(&s_lock);
 
     ESP_LOGI(TAG, "QR show  qr_data=\"%.60s%s\"  amount=\"%s\"  desc=\"%s\"",
@@ -105,6 +107,13 @@ static void handle_result(const char *data, int len)
     ESP_LOGI(TAG, "Result  status=\"%s\"  message=\"%s\"",
              cJSON_IsString(status)  ? status->valuestring  : "(none)",
              cJSON_IsString(message) ? message->valuestring : "");
+
+    /* Payment success → clear QR data so the UI hides the QR screen */
+    if (cJSON_IsString(status) &&
+        strcmp(status->valuestring, "success") == 0) {
+        handle_qr_hide();
+        ESP_LOGI(TAG, "Payment success – QR cleared");
+    }
 
     cJSON_Delete(root);
 }
@@ -194,4 +203,9 @@ bool mqtt_service_has_qr_data(void)
 const qr_payload_t *mqtt_service_get_qr(void)
 {
     return &s_qr;
+}
+
+uint32_t mqtt_service_get_qr_gen(void)
+{
+    return s_qr_gen;
 }

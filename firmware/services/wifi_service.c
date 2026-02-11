@@ -13,7 +13,7 @@
 
 #include "wifi_service.h"
 #include "app_config.h"
-#include "secrets/secrets.h"
+#include "secrets.h"
 
 #include <string.h>
 

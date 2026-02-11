@@ -9,6 +9,12 @@
 #define APP_MQTT_TOPIC_QR_HIDE  "pos/qr/hide"
 #define APP_MQTT_TOPIC_RESULT   "pos/qr/result"
 
+/* ── Touch (GT911 over I2C) ──────────────── */
+#define APP_TOUCH_I2C_SDA       19
+#define APP_TOUCH_I2C_SCL       45
+#define APP_TOUCH_I2C_FREQ_HZ   400000
+#define APP_TOUCH_GT911_ADDR    0x5D
+
 /* ── LCD (ST7701 RGB 480×480 RGB565) ──────── */
 #define APP_LCD_H_RES           480
 #define APP_LCD_V_RES           480

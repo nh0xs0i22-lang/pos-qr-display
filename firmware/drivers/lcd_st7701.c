@@ -1,8 +1,14 @@
 /*
- * ST7701S RGB LCD Driver – 480×480 RGB565
+ * ST7701S RGB LCD Driver – Guition ESP32-S3-4848S040
  *
- * Initialises the ST7701S controller via 3-wire SPI (bit-bang),
- * then creates an ESP-IDF RGB panel backed by two PSRAM framebuffers.
+ * 480×480 IPS RGB565 panel, driven via ESP-IDF LCD_CAM peripheral.
+ * Controller configured over 3-wire SPI (9-bit, GPIO bit-bang),
+ * pixel data streamed over 16-bit RGB parallel interface with
+ * double PSRAM framebuffers and SRAM bounce buffers.
+ *
+ * Init sequence: software reset, Command2 BK0 (timing + gamma),
+ * Command2 BK1 (voltage), gate/source EQ, BK3 VCOM cal, INVOFF,
+ * COLMOD RGB565, Sleep Out, Display ON.
  *
  * Pin assignments are board-specific — edit the PIN_* defines below.
  */
@@ -19,6 +25,7 @@
 #include "esp_log.h"
 #include "esp_check.h"
 #include "esp_lcd_panel_rgb.h"
+#include "esp_rom_sys.h"
 #include "driver/gpio.h"
 
 static const char *TAG = "st7701";
@@ -41,46 +48,49 @@ static const char *TAG = "st7701";
 #define PIN_VSYNC       GPIO_NUM_17
 #define PIN_DE          GPIO_NUM_18
 
-/* RGB565 data bus (D0–D15) — matched to ESPHome YAML pinout */
-#define PIN_D0          GPIO_NUM_7      /* B0 */
-#define PIN_D1          GPIO_NUM_15     /* B1 */
-#define PIN_D2          GPIO_NUM_8      /* B2 */
-#define PIN_D3          GPIO_NUM_20     /* B3 */
-#define PIN_D4          GPIO_NUM_3      /* B4 */
-#define PIN_D5          GPIO_NUM_13     /* G0 */
-#define PIN_D6          GPIO_NUM_14     /* G1 */
-#define PIN_D7          GPIO_NUM_0      /* G2 */
-#define PIN_D8          GPIO_NUM_4      /* G3 */
-#define PIN_D9          GPIO_NUM_5      /* G4 */
-#define PIN_D10         GPIO_NUM_6      /* G5 */
-#define PIN_D11         GPIO_NUM_46     /* R0 */
-#define PIN_D12         GPIO_NUM_9      /* R1 */
-#define PIN_D13         GPIO_NUM_10     /* R2 */
-#define PIN_D14         GPIO_NUM_11     /* R3 */
-#define PIN_D15         GPIO_NUM_12     /* R4 */
+/* RGB565 data bus (D0–D15) — ArduinoGFX verified pin mapping            *
+ * D[4:0]=Blue, D[10:5]=Green, D[15:11]=Red                              */
+#define PIN_D0          GPIO_NUM_4      /* B0 */
+#define PIN_D1          GPIO_NUM_5      /* B1 */
+#define PIN_D2          GPIO_NUM_6      /* B2 */
+#define PIN_D3          GPIO_NUM_7      /* B3 */
+#define PIN_D4          GPIO_NUM_15     /* B4 */
+#define PIN_D5          GPIO_NUM_8      /* G0 */
+#define PIN_D6          GPIO_NUM_20     /* G1 */
+#define PIN_D7          GPIO_NUM_3      /* G2 */
+#define PIN_D8          GPIO_NUM_46     /* G3 */
+#define PIN_D9          GPIO_NUM_9      /* G4 */
+#define PIN_D10         GPIO_NUM_10     /* G5 */
+#define PIN_D11         GPIO_NUM_11     /* R0 */
+#define PIN_D12         GPIO_NUM_12     /* R1 */
+#define PIN_D13         GPIO_NUM_13     /* R2 */
+#define PIN_D14         GPIO_NUM_14     /* R3 */
+#define PIN_D15         GPIO_NUM_0      /* R4 */
 
 /* ═══════════════════════════════════════════════════════════════════════ *
- *  RGB timing — hardware-verified values                                 *
+ *  RGB timing — hardware-verified values                                  *
  * ═══════════════════════════════════════════════════════════════════════ */
 
-#define PCLK_HZ             (40 * 1000 * 1000)
+#define PCLK_HZ             (12 * 1000 * 1000)
 #define HSYNC_BACK_PORCH    50
-#define HSYNC_FRONT_PORCH   10
-#define HSYNC_PULSE_WIDTH   8
+#define HSYNC_FRONT_PORCH   50
+#define HSYNC_PULSE_WIDTH   10
 #define VSYNC_BACK_PORCH    20
-#define VSYNC_FRONT_PORCH   10
-#define VSYNC_PULSE_WIDTH   8
+#define VSYNC_FRONT_PORCH   20
+#define VSYNC_PULSE_WIDTH   2
 
 /*
- * Bounce buffer: small internal-SRAM region that the GDMA reads from
- * while the CPU refills it from PSRAM in the background.
- * Tune this value to trade SRAM usage for smoother DMA throughput.
- * Larger  → fewer refill interrupts, more SRAM consumed.
- * Smaller → more frequent refills, less SRAM.
- * Set to 0 to disable bounce buffers (direct PSRAM DMA, saves SRAM
- * but may cause flicker if PSRAM bandwidth is contended).
+ * Bounce buffer: small SRAM staging area between PSRAM and GDMA.
+ * The CPU copies PSRAM→bounce while GDMA reads bounce→LCD_CAM.
+ * Larger values reduce refill interrupt overhead but consume more SRAM.
+ * 20 lines × 480 px × 2 bytes = 19 200 bytes of internal SRAM.
+ *
+ * Note: during CPU-intensive LVGL rendering (large dirty regions),
+ * the bounce refill competes with the render for CPU time.  If you
+ * observe brief dark bands during content transitions, increase this
+ * value or raise the LVGL task priority.
  */
-#define BOUNCE_BUF_LINES    10
+#define BOUNCE_BUF_LINES    20
 
 /* ═══════════════════════════════════════════════════════════════════════ *
  *  3-wire SPI (bit-bang) – used only once during ST7701S register init   *
@@ -88,98 +98,126 @@ static const char *TAG = "st7701";
 
 static void spi_gpio_init(void)
 {
-    gpio_set_direction(PIN_SPI_CS,  GPIO_MODE_OUTPUT);
-    gpio_set_direction(PIN_SPI_SCK, GPIO_MODE_OUTPUT);
-    gpio_set_direction(PIN_SPI_SDA, GPIO_MODE_OUTPUT);
-    gpio_set_level(PIN_SPI_CS,  1);
-    gpio_set_level(PIN_SPI_SCK, 1);
+    const gpio_config_t spi_io = {
+        .pin_bit_mask = (1ULL << PIN_SPI_CS)
+                      | (1ULL << PIN_SPI_SCK)
+                      | (1ULL << PIN_SPI_SDA),
+        .mode         = GPIO_MODE_OUTPUT,
+        .pull_up_en   = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type    = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&spi_io);
+
+    gpio_set_level(PIN_SPI_CS,  1);    /* CS idle HIGH  */
+    gpio_set_level(PIN_SPI_SCK, 0);    /* CPOL=0: SCK idle LOW */
+    gpio_set_level(PIN_SPI_SDA, 0);
 }
 
 /*
- * Transmit one 9-bit frame over 3-wire SPI:
- *   bit 8  = DC  (0 → command, 1 → parameter)
- *   bit 7…0 = data byte, MSB first
+ * SPI MODE 0 bit-bang: CPOL=0 (idle LOW), CPHA=0 (latch on RISING edge).
+ * Transmit one 9-bit frame: bit 8 = DC (0→cmd, 1→data), bits 7…0 = MSB first.
+ *
+ * 10 µs per clock edge (~50 kHz effective).  Conservative but irrelevant —
+ * the entire init takes ~30 ms of SPI time plus the 120 ms sleep-out delay.
+ * Do not "optimise" this to faster timing; the margin buys nothing and risks
+ * setup/hold violations on boards with long SPI traces.
  */
 static void spi_write_9bit(bool dc, uint8_t val)
 {
-    gpio_set_level(PIN_SPI_CS, 0);
+    gpio_set_level(PIN_SPI_SCK, 0);       /* 1. ensure SCK LOW         */
+    esp_rom_delay_us(10);
+    gpio_set_level(PIN_SPI_CS, 0);        /* 2. CS assert              */
+    esp_rom_delay_us(10);
 
-    /* DC bit */
-    gpio_set_level(PIN_SPI_SCK, 0);
-    gpio_set_level(PIN_SPI_SDA, dc);
-    gpio_set_level(PIN_SPI_SCK, 1);
+    /* ── DC bit (bit 8) ─────────────────────────── */
+    gpio_set_level(PIN_SPI_SDA, dc);      /* 3. set data while SCK LOW */
+    esp_rom_delay_us(10);
+    gpio_set_level(PIN_SPI_SCK, 1);       /* 4. rising edge → latch    */
+    esp_rom_delay_us(10);
+    gpio_set_level(PIN_SPI_SCK, 0);       /* 5. SCK back LOW           */
+    esp_rom_delay_us(10);
 
-    /* D7…D0 */
+    /* ── D7…D0 (bits 7 → 0) ────────────────────── */
     for (int i = 7; i >= 0; i--) {
-        gpio_set_level(PIN_SPI_SCK, 0);
         gpio_set_level(PIN_SPI_SDA, (val >> i) & 1);
-        gpio_set_level(PIN_SPI_SCK, 1);
+        esp_rom_delay_us(10);
+        gpio_set_level(PIN_SPI_SCK, 1);   /* rising edge → latch       */
+        esp_rom_delay_us(10);
+        gpio_set_level(PIN_SPI_SCK, 0);   /* SCK back LOW              */
+        esp_rom_delay_us(10);
     }
 
-    gpio_set_level(PIN_SPI_CS, 1);
+    esp_rom_delay_us(10);
+    gpio_set_level(PIN_SPI_CS, 1);        /* CS de-assert              */
+    esp_rom_delay_us(10);
 }
 
 static inline void st7701_cmd(uint8_t cmd)   { spi_write_9bit(false, cmd); }
 static inline void st7701_data(uint8_t d)    { spi_write_9bit(true,  d);   }
 
 /* ═══════════════════════════════════════════════════════════════════════ *
- *  ST7701S register init sequence (480×480, RGB565)                      *
+ *  ST7701S register initialisation                                       *
+ *                                                                        *
+ *  Original working init sequence restored.  Inline sequential calls,   *
+ *  no table-driven architecture.                                        *
  * ═══════════════════════════════════════════════════════════════════════ */
 
 static void st7701_panel_init(void)
 {
-    /* Sleep Out */
-    st7701_cmd(0x11);
+    /* Software reset */
+    st7701_cmd(0x01);
     vTaskDelay(pdMS_TO_TICKS(120));
 
-    /* ── Command2 BK0 ───────────────────────────────────────────────── */
+    /* ---- Command2 BK0 (timing + gamma) ---- */
     st7701_cmd(0xFF);
     st7701_data(0x77); st7701_data(0x01); st7701_data(0x00);
     st7701_data(0x00); st7701_data(0x10);
 
-    st7701_cmd(0xC0);  /* LNESET  – 480 lines */
+    st7701_cmd(0xC0);
     st7701_data(0x3B); st7701_data(0x00);
 
-    st7701_cmd(0xC1);  /* PORCTRL – porch timing */
+    st7701_cmd(0xC1);
     st7701_data(0x0D); st7701_data(0x02);
 
-    st7701_cmd(0xC2);  /* INVSET  – inversion & frame rate */
+    st7701_cmd(0xC2);
     st7701_data(0x31); st7701_data(0x05);
 
-    st7701_cmd(0xCD);  st7701_data(0x00);
+    st7701_cmd(0xCD);
+    st7701_data(0x00);
 
-    /* Positive voltage gamma */
+    /* Positive gamma (16 bytes) */
     st7701_cmd(0xB0);
     st7701_data(0x00); st7701_data(0x11); st7701_data(0x18); st7701_data(0x0E);
     st7701_data(0x11); st7701_data(0x06); st7701_data(0x07); st7701_data(0x08);
     st7701_data(0x07); st7701_data(0x22); st7701_data(0x04); st7701_data(0x12);
     st7701_data(0x0F); st7701_data(0xAA); st7701_data(0x31); st7701_data(0x18);
 
-    /* Negative voltage gamma */
+    /* Negative gamma (16 bytes) */
     st7701_cmd(0xB1);
     st7701_data(0x00); st7701_data(0x11); st7701_data(0x19); st7701_data(0x0E);
     st7701_data(0x12); st7701_data(0x07); st7701_data(0x08); st7701_data(0x08);
     st7701_data(0x08); st7701_data(0x22); st7701_data(0x04); st7701_data(0x11);
     st7701_data(0x11); st7701_data(0xA9); st7701_data(0x32); st7701_data(0x18);
 
-    /* ── Command2 BK1 ───────────────────────────────────────────────── */
+    /* ---- Command2 BK1 (voltage) ---- */
     st7701_cmd(0xFF);
     st7701_data(0x77); st7701_data(0x01); st7701_data(0x00);
     st7701_data(0x00); st7701_data(0x11);
 
-    st7701_cmd(0xB0);  st7701_data(0x60);  /* Vop amplitude  */
-    st7701_cmd(0xB1);  st7701_data(0x32);  /* VCOM amplitude */
-    st7701_cmd(0xB2);  st7701_data(0x07);  /* VGH voltage    */
-    st7701_cmd(0xB3);  st7701_data(0x80);
-    st7701_cmd(0xB5);  st7701_data(0x49);  /* VGL voltage    */
-    st7701_cmd(0xB7);  st7701_data(0x85);
-    st7701_cmd(0xB8);  st7701_data(0x21);  /* AVDD / VCL     */
-    st7701_cmd(0xC1);  st7701_data(0x78);
-    st7701_cmd(0xC2);  st7701_data(0x78);
-    st7701_cmd(0xD0);  st7701_data(0x88);
+    st7701_cmd(0xB0); st7701_data(0x60);
+    st7701_cmd(0xB1); st7701_data(0x32);
+    st7701_cmd(0xB2); st7701_data(0x07);
+    st7701_cmd(0xB3); st7701_data(0x80);
+    st7701_cmd(0xB5); st7701_data(0x49);
+    st7701_cmd(0xB7); st7701_data(0x85);
+    st7701_cmd(0xB8); st7701_data(0x21);
+    st7701_cmd(0xC1); st7701_data(0x78);
+    st7701_cmd(0xC2); st7701_data(0x78);
+    st7701_cmd(0xD0); st7701_data(0x88);
     vTaskDelay(pdMS_TO_TICKS(100));
 
-    /* Gate EQ / source EQ */
+    /* ---- Gate EQ / Source EQ ---- */
     st7701_cmd(0xE0);
     st7701_data(0x00); st7701_data(0x1B); st7701_data(0x02);
 
@@ -230,16 +268,24 @@ static void st7701_panel_init(void)
     st7701_data(0xFF); st7701_data(0xFF); st7701_data(0xFF); st7701_data(0x20);
     st7701_data(0x45); st7701_data(0x67); st7701_data(0x98); st7701_data(0xBA);
 
-    /* ── Exit Command2 — back to standard commands ──────────────────── */
+    /* ---- Command2 BK3 – VCOM calibration ---- */
+    st7701_cmd(0xFF);
+    st7701_data(0x77); st7701_data(0x01); st7701_data(0x00);
+    st7701_data(0x00); st7701_data(0x13);
+
+    st7701_cmd(0xE5); st7701_data(0xE4);
+
+    /* ---- Exit Command2 ---- */
     st7701_cmd(0xFF);
     st7701_data(0x77); st7701_data(0x01); st7701_data(0x00);
     st7701_data(0x00); st7701_data(0x00);
 
-    /* COLMOD – 16-bit / pixel (RGB565) */
-    st7701_cmd(0x3A);  st7701_data(0x55);
-
-    /* Display ON */
-    st7701_cmd(0x29);
+    /* ---- Standard commands ---- */
+    st7701_cmd(0x20);                           /* INVOFF */
+    st7701_cmd(0x3A); st7701_data(0x50);        /* COLMOD: 16-bit RGB interface */
+    st7701_cmd(0x11);                           /* Sleep Out */
+    vTaskDelay(pdMS_TO_TICKS(120));
+    st7701_cmd(0x29);                           /* Display ON */
     vTaskDelay(pdMS_TO_TICKS(20));
 }
 
@@ -289,8 +335,9 @@ esp_err_t lcd_st7701_init(esp_lcd_panel_handle_t *out_panel)
             .vsync_pulse_width = VSYNC_PULSE_WIDTH,
             .flags.pclk_active_neg = true,
         },
-        .data_width = 16,   /* RGB565 */
-        .num_fbs    = 2,     /* double framebuffer in PSRAM */
+        .data_width = 16,        /* RGB565 */
+        .bits_per_pixel = 16,   /* must match COLMOD 0x50 */
+        .num_fbs    = 2,        /* double framebuffer in PSRAM */
         .bounce_buffer_size_px = APP_LCD_H_RES * BOUNCE_BUF_LINES,
         .psram_trans_align     = 64,
         .hsync_gpio_num  = PIN_HSYNC,
@@ -314,6 +361,21 @@ esp_err_t lcd_st7701_init(esp_lcd_panel_handle_t *out_panel)
     ESP_RETURN_ON_ERROR(esp_lcd_panel_init(panel),
                         TAG, "RGB panel init failed");
 
+    /* ================================================================ *
+     *  PHASE 5 — Backlight ON after valid frames                       *
+     *                                                                   *
+     *  esp_lcd_panel_init() started the PCLK and GDMA.  The PSRAM      *
+     *  framebuffers were zero-filled by the allocator, so the panel     *
+     *  is now receiving valid black frames.  We wait for 5 full frames  *
+     *  (~120 ms at 12 MHz / ~42 Hz) to ensure:                         *
+     *    - Source drivers have latched known-good pixel data             *
+     *    - Any GDMA startup transients have settled                     *
+     *    - The RGB timing is locked (HSYNC/VSYNC/DE stable)             *
+     *                                                                   *
+     *  Without this delay, the user sees a brief flash of undefined     *
+     *  source driver state (random pixels or white) on cold boot.       *
+     * ================================================================ */
+    vTaskDelay(pdMS_TO_TICKS(120));
     backlight_set(true);
 
     ESP_LOGI(TAG, "LCD ready (%dx%d RGB565, 2× PSRAM framebuffer)",
